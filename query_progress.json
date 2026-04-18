@@ -1,0 +1,57 @@
+{
+  "|usa|no_web": [
+    "pizza",
+    "restaurants",
+    "fast food",
+    "bakeries",
+    "coffee shops",
+    "shops",
+    "services",
+    "bars",
+    "pubs",
+    "cafes",
+    "businesses"
+  ],
+  "|turkey|no_web": [
+    "businesses",
+    "stores",
+    "salons",
+    "services",
+    "clinics",
+    "bakeries",
+    "mechanics",
+    "cafes",
+    "pharmacies",
+    "hotels",
+    "restaurants",
+    "gyms",
+    "shops"
+  ],
+  "|kosovo|no_web": [
+    "salons",
+    "services",
+    "restaurants",
+    "businesses",
+    "shops",
+    "stores"
+  ],
+  "|uae|no_web": [
+    "restaurants",
+    "services",
+    "shops"
+  ],
+  "|lipjan|no_web": [
+    "stores||Lipjan",
+    "shops||Lipjan",
+    "clinics||Lipjan",
+    "mechanics||Lipjan",
+    "restaurants||Lipjan",
+    "salons||Lipjan",
+    "businesses||Lipjan",
+    "services||Lipjan",
+    "bakeries||Lipjan",
+    "pharmacies||Lipjan",
+    "gyms||Lipjan",
+    "hotels||Lipjan"
+  ]
+}
