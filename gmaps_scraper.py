@@ -496,321 +496,326 @@ async def scrape(query: str, location: str, max_results: int, output: str, with_
     results      = []
     new_seen_keys: set = set()
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = await browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            locale="en-US",
-        )
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                locale="en-US",
+            )
 
-        scraped_count = 0
-        total_inspected = 0
+            scraped_count = 0
+            total_inspected = 0
 
-        for q_idx, (search_query, current_location) in enumerate(remaining_combos, 1):
-            if scraped_count >= max_results:
-                break
+            for q_idx, (search_query, current_location) in enumerate(remaining_combos, 1):
+                if scraped_count >= max_results:
+                    break
 
-            page = await context.new_page()
+                page = await context.new_page()
 
-            # ── 1. Navigate ──────────────────────────────────────────────────
-            url = build_query_url(search_query, current_location)
-            if len(remaining_combos) > 1:
-                print(f"\n[*] Query {q_idx}/{len(remaining_combos)}: \"{search_query}\" in {current_location}")
-            else:
-                print(f"\n[*] Query: \"{search_query}\" in {current_location}")
-            print(f"[*] Navigating to: {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-            await asyncio.sleep(3)
+                # ── 1. Navigate ──────────────────────────────────────────────────
+                url = build_query_url(search_query, current_location)
+                if len(remaining_combos) > 1:
+                    print(f"\n[*] Query {q_idx}/{len(remaining_combos)}: \"{search_query}\" in {current_location}")
+                else:
+                    print(f"\n[*] Query: \"{search_query}\" in {current_location}")
+                print(f"[*] Navigating to: {url}")
+                await page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                await asyncio.sleep(3)
 
-            # ── 2. Accept cookies if prompted ────────────────────────────────
-            try:
-                btn = page.locator("button", has_text="Accept all")
-                if await btn.count():
-                    await btn.first.click()
-                    await asyncio.sleep(1)
-            except Exception:
-                pass
-
-            # ── 3. Scroll-collect-inspect loop ───────────────────────────────
-            # Instead of collecting all URLs first and then filtering, we
-            # continuously scroll for more listings whenever we need them.
-            # This ensures --max N actually finds N matching businesses.
-            PANEL = "div[role='feed']"
-            print("[*] Scrolling and inspecting results …")
-
-            collected_hrefs: list[str] = []  # ordered unique hrefs from this query
-            collected_set: set = set()       # fast lookup for dedup
-            inspect_cursor = 0               # next index in collected_hrefs to inspect
-            stale_scroll_count = 0           # consecutive scrolls with no new links
-            MAX_STALE_SCROLLS = 15           # give up on this query after this many
-
-            while scraped_count < max_results:
-                # ── Scroll for more listings if we've inspected everything so far
-                if inspect_cursor >= len(collected_hrefs):
-                    new_found_this_scroll = 0
-                    # Do a few scroll rounds to collect more links
-                    for _ in range(5):
-                        links = await page.locator("a[href*='/maps/place/']").all()
-                        for link in links:
-                            href = await link.get_attribute("href")
-                            if href and href not in collected_set:
-                                collected_set.add(href)
-                                collected_hrefs.append(href)
-                                new_found_this_scroll += 1
-
-                        await page.evaluate(
-                            f'const el = document.querySelector("{PANEL}"); if (el) el.scrollTop += 800;'
-                        )
-                        await asyncio.sleep(SCROLL_PAUSE)
-
-                    if new_found_this_scroll == 0:
-                        stale_scroll_count += 1
-                        if stale_scroll_count >= MAX_STALE_SCROLLS:
-                            print(f"[*] No more results to scroll for this query.")
-                            break
-                    else:
-                        stale_scroll_count = 0
-
-                    # Still nothing new to inspect? Keep scrolling
-                    if inspect_cursor >= len(collected_hrefs):
-                        continue
-
-                # ── Pick next listing to inspect
-                href = collected_hrefs[inspect_cursor]
-                inspect_cursor += 1
-                total_inspected += 1
-
-                key = place_key(href)
-
-                # Dedup: skip already-seen across queries in this run
-                if key in new_seen_keys:
-                    continue
-
-                # Cross-run duplicate check
-                if key in seen:
-                    print(f"  [{total_inspected}] SKIP (already scraped in a previous run): {key}")
-                    continue
-
+                # ── 2. Accept cookies if prompted ────────────────────────────────
                 try:
-                    detail_page = await context.new_page()
-                    await detail_page.goto(href, wait_until="domcontentloaded", timeout=60_000)
-                    await asyncio.sleep(2)
+                    btn = page.locator("button", has_text="Accept all")
+                    if await btn.count():
+                        await btn.first.click()
+                        await asyncio.sleep(1)
+                except Exception:
+                    pass
 
-                    # ── Name ──────────────────────────────────────────────
-                    name = ""
-                    try:
-                        name = await detail_page.locator("h1").first.inner_text(timeout=5_000)
-                    except Exception:
-                        pass
+                # ── 3. Scroll-collect-inspect loop ───────────────────────────────
+                # Instead of collecting all URLs first and then filtering, we
+                # continuously scroll for more listings whenever we need them.
+                # This ensures --max N actually finds N matching businesses.
+                PANEL = "div[role='feed']"
+                print("[*] Scrolling and inspecting results …")
 
-                    # ── Website & Menu Fallback ───────────────────────────
-                    website = ""
-                    try:
-                        web_link = detail_page.locator("a[data-item-id='authority']")
-                        if await web_link.count():
-                            website = await web_link.first.get_attribute("href") or ""
-                            
-                        # If no website is found, check the menu link (often serves as their website)
-                        if not website:
-                            menu_link = detail_page.locator("a[data-item-id='menu']")
-                            if await menu_link.count():
-                                website = await menu_link.first.get_attribute("href") or ""
-                    except Exception:
-                        pass
+                collected_hrefs: list[str] = []  # ordered unique hrefs from this query
+                collected_set: set = set()       # fast lookup for dedup
+                inspect_cursor = 0               # next index in collected_hrefs to inspect
+                stale_scroll_count = 0           # consecutive scrolls with no new links
+                MAX_STALE_SCROLLS = 15           # give up on this query after this many
 
-                    if with_websites:
-                        # We WANT businesses that have a website — skip those without
-                        if not website:
-                            new_seen_keys.add(key)
-                            await detail_page.close()
-                            print(f"  [{total_inspected}] SKIP (no website): {name}")
+                while scraped_count < max_results:
+                    # ── Scroll for more listings if we've inspected everything so far
+                    if inspect_cursor >= len(collected_hrefs):
+                        new_found_this_scroll = 0
+                        # Do a few scroll rounds to collect more links
+                        for _ in range(5):
+                            links = await page.locator("a[href*='/maps/place/']").all()
+                            for link in links:
+                                href = await link.get_attribute("href")
+                                if href and href not in collected_set:
+                                    collected_set.add(href)
+                                    collected_hrefs.append(href)
+                                    new_found_this_scroll += 1
+
+                            await page.evaluate(
+                                f'const el = document.querySelector("{PANEL}"); if (el) el.scrollTop += 800;'
+                            )
+                            await asyncio.sleep(SCROLL_PAUSE)
+
+                        if new_found_this_scroll == 0:
+                            stale_scroll_count += 1
+                            if stale_scroll_count >= MAX_STALE_SCROLLS:
+                                print(f"[*] No more results to scroll for this query.")
+                                break
+                        else:
+                            stale_scroll_count = 0
+
+                        # Still nothing new to inspect? Keep scrolling
+                        if inspect_cursor >= len(collected_hrefs):
                             continue
-                    else:
-                        # We WANT businesses WITHOUT a website — skip those with one
-                        if website:
-                            new_seen_keys.add(key)
-                            await detail_page.close()
-                            print(f"  [{total_inspected}] SKIP (has website): {name}")
-                            continue
 
-                    # ── Phone ─────────────────────────────────────────────
-                    phone = ""
-                    try:
-                        phone_el = detail_page.locator("button[data-item-id*='phone']")
-                        if await phone_el.count():
-                            phone = clean_phone(await phone_el.first.get_attribute("aria-label") or "")
-                            phone = phone.replace("Phone:", "").strip()
-                    except Exception:
-                        pass
+                    # ── Pick next listing to inspect
+                    href = collected_hrefs[inspect_cursor]
+                    inspect_cursor += 1
+                    total_inspected += 1
 
-                    # Skip businesses without a phone number
-                    if not phone:
-                        new_seen_keys.add(key)
-                        await detail_page.close()
-                        print(f"  [{total_inspected}] SKIP (no phone number): {name}")
+                    key = place_key(href)
+
+                    # Dedup: skip already-seen across queries in this run
+                    if key in new_seen_keys:
                         continue
 
-                    # ── Address ───────────────────────────────────────────
-                    address = ""
+                    # Cross-run duplicate check
+                    if key in seen:
+                        print(f"  [{total_inspected}] SKIP (already scraped in a previous run): {key}")
+                        continue
+
                     try:
-                        addr_el = detail_page.locator("button[data-item-id='address']")
-                        if await addr_el.count():
-                            address = await addr_el.first.get_attribute("aria-label") or ""
-                            address = address.replace("Address:", "").strip()
-                    except Exception:
-                        pass
+                        detail_page = await context.new_page()
+                        await detail_page.goto(href, wait_until="domcontentloaded", timeout=60_000)
+                        await asyncio.sleep(2)
 
-                    # ── Rating & Reviews ──────────────────────────────────
-                    rating, reviews = "", ""
-                    try:
-                        rating_el = detail_page.locator("div.F7nice span[aria-hidden='true']")
-                        if await rating_el.count():
-                            rating = await rating_el.first.inner_text()
-                        review_el = detail_page.locator("div.F7nice span[aria-label*='reviews']")
-                        if await review_el.count():
-                            reviews = (await review_el.first.get_attribute("aria-label") or "").split()[0]
-                    except Exception:
-                        pass
+                        # ── Name ──────────────────────────────────────────────
+                        name = ""
+                        try:
+                            name = await detail_page.locator("h1").first.inner_text(timeout=5_000)
+                        except Exception:
+                            pass
 
-                    # ── Category ──────────────────────────────────────────
-                    category = ""
-                    try:
-                        cat_el = detail_page.locator("button.DkEaL")
-                        if await cat_el.count():
-                            category = await cat_el.first.inner_text()
-                    except Exception:
-                        pass
+                        # ── Website & Menu Fallback ───────────────────────────
+                        website = ""
+                        try:
+                            web_link = detail_page.locator("a[data-item-id='authority']")
+                            if await web_link.count():
+                                website = await web_link.first.get_attribute("href") or ""
+                                
+                            # If no website is found, check the menu link (often serves as their website)
+                            if not website:
+                                menu_link = detail_page.locator("a[data-item-id='menu']")
+                                if await menu_link.count():
+                                    website = await menu_link.first.get_attribute("href") or ""
+                        except Exception:
+                            pass
 
-                    # ── Email & Social Media ──────────────────────────────
-                    contact_info = {
-                        "Email": "", "Instagram": "", "Facebook": "",
-                        "Twitter": "", "LinkedIn": "", "TikTok": "", "YouTube": "",
-                    }
-
-                    if website:
-                        # Has website → scrape email + socials from it
-                        await detail_page.close()
-                        print(f"      Scraping website for email/socials: {website[:60]}…")
-                        contact_info = await extract_contact_info(context, website)
-                    else:
-                        # No website → try to find email from Maps page + Google search
-                        print(f"      Searching for email (no website)…")
-                        maps_email = await extract_email_from_maps_page(detail_page)
-                        await detail_page.close()
-                        if maps_email:
-                            contact_info["Email"] = maps_email
+                        if with_websites:
+                            # We WANT businesses that have a website — skip those without
+                            if not website:
+                                new_seen_keys.add(key)
+                                await detail_page.close()
+                                print(f"  [{total_inspected}] SKIP (no website): {name}")
+                                continue
                         else:
-                            # Try a quick Google search for the business email
-                            search_loc = current_location if current_location else ""
-                            google_email = await search_email_for_business(context, name, search_loc)
-                            if google_email:
-                                contact_info["Email"] = google_email
+                            # We WANT businesses WITHOUT a website — skip those with one
+                            if website:
+                                new_seen_keys.add(key)
+                                await detail_page.close()
+                                print(f"  [{total_inspected}] SKIP (has website): {name}")
+                                continue
 
-                    extras = []
-                    if contact_info["Email"]:
-                        extras.append(f"📧 {contact_info['Email'][:40]}")
-                    social_found = [p for p in SOCIAL_PATTERNS if contact_info.get(p)]
-                    if social_found:
-                        extras.append(f"🔗 {', '.join(social_found)}")
-                    if extras:
-                        print(f"      Found: {' | '.join(extras)}")
+                        # ── Phone ─────────────────────────────────────────────
+                        phone = ""
+                        try:
+                            phone_el = detail_page.locator("button[data-item-id*='phone']")
+                            if await phone_el.count():
+                                phone = clean_phone(await phone_el.first.get_attribute("aria-label") or "")
+                                phone = phone.replace("Phone:", "").strip()
+                        except Exception:
+                            pass
 
-                    record = {
-                        "Name":      name.strip(),
-                        "Category":  category.strip(),
-                        "Phone":     phone,
-                        "Email":     contact_info["Email"],
-                        "Address":   address,
-                        "Rating":    rating.strip(),
-                        "Reviews":   reviews.strip(),
-                        "Website":   website,
-                        "Instagram": contact_info["Instagram"],
-                        "Facebook":  contact_info["Facebook"],
-                        "Twitter":   contact_info["Twitter"],
-                        "LinkedIn":  contact_info["LinkedIn"],
-                        "TikTok":    contact_info["TikTok"],
-                        "YouTube":   contact_info["YouTube"],
-                        "Maps URL":  href,
-                    }
+                        # Skip businesses without a phone number
+                        if not phone:
+                            new_seen_keys.add(key)
+                            await detail_page.close()
+                            print(f"  [{total_inspected}] SKIP (no phone number): {name}")
+                            continue
 
-                    results.append(record)
-                    new_seen_keys.add(key)
-                    scraped_count += 1
-                    remaining = max_results - scraped_count
-                    print(f"  [{total_inspected}] ✓ ({scraped_count}/{max_results}) {name} | {phone} | {address[:45]}")
+                        # ── Address ───────────────────────────────────────────
+                        address = ""
+                        try:
+                            addr_el = detail_page.locator("button[data-item-id='address']")
+                            if await addr_el.count():
+                                address = await addr_el.first.get_attribute("aria-label") or ""
+                                address = address.replace("Address:", "").strip()
+                        except Exception:
+                            pass
 
-                except Exception as e:
-                    print(f"  [{total_inspected}] ERROR: {e}")
-                finally:
-                    try:
-                        await detail_page.close()
-                    except Exception:
-                        pass
+                        # ── Rating & Reviews ──────────────────────────────────
+                        rating, reviews = "", ""
+                        try:
+                            rating_el = detail_page.locator("div.F7nice span[aria-hidden='true']")
+                            if await rating_el.count():
+                                rating = await rating_el.first.inner_text()
+                            review_el = detail_page.locator("div.F7nice span[aria-label*='reviews']")
+                            if await review_el.count():
+                                reviews = (await review_el.first.get_attribute("aria-label") or "").split()[0]
+                        except Exception:
+                            pass
 
-            await page.close()
+                        # ── Category ──────────────────────────────────────────
+                        category = ""
+                        try:
+                            cat_el = detail_page.locator("button.DkEaL")
+                            if await cat_el.count():
+                                category = await cat_el.first.inner_text()
+                        except Exception:
+                            pass
 
-            # Mark this query config as completed in progress
-            item_key = f"{search_query}||{current_location}"
-            completed_items.add(item_key)
-            progress[session_key] = list(completed_items)
-            save_progress(PROGRESS_FILE, progress)
+                        # ── Email & Social Media ──────────────────────────────
+                        contact_info = {
+                            "Email": "", "Instagram": "", "Facebook": "",
+                            "Twitter": "", "LinkedIn": "", "TikTok": "", "YouTube": "",
+                        }
 
-            print(f"[*] Progress: {scraped_count}/{max_results} matching businesses found so far")
-            print(f"[*] Query \"{search_query}\" in {current_location} completed and saved to progress")
+                        if website:
+                            # Has website → scrape email + socials from it
+                            await detail_page.close()
+                            print(f"      Scraping website for email/socials: {website[:60]}…")
+                            contact_info = await extract_contact_info(context, website)
+                        else:
+                            # No website → try to find email from Maps page + Google search
+                            print(f"      Searching for email (no website)…")
+                            maps_email = await extract_email_from_maps_page(detail_page)
+                            await detail_page.close()
+                            if maps_email:
+                                contact_info["Email"] = maps_email
+                            else:
+                                # Try a quick Google search for the business email
+                                search_loc = current_location if current_location else ""
+                                google_email = await search_email_for_business(context, name, search_loc)
+                                if google_email:
+                                    contact_info["Email"] = google_email
 
-        await browser.close()
+                        extras = []
+                        if contact_info["Email"]:
+                            extras.append(f"📧 {contact_info['Email'][:40]}")
+                        social_found = [p for p in SOCIAL_PATTERNS if contact_info.get(p)]
+                        if social_found:
+                            extras.append(f"🔗 {', '.join(social_found)}")
+                        if extras:
+                            print(f"      Found: {' | '.join(extras)}")
 
-    # ── 5. Persist seen keys ──────────────────────────────────────────────
-    seen.update(new_seen_keys)
-    save_seen(SEEN_FILE, seen)
-    print(f"\n[*] Updated seen list → {len(seen)} total businesses tracked in {SEEN_FILE}")
+                        record = {
+                            "Name":      name.strip(),
+                            "Category":  category.strip(),
+                            "Phone":     phone,
+                            "Email":     contact_info["Email"],
+                            "Address":   address,
+                            "Rating":    rating.strip(),
+                            "Reviews":   reviews.strip(),
+                            "Website":   website,
+                            "Instagram": contact_info["Instagram"],
+                            "Facebook":  contact_info["Facebook"],
+                            "Twitter":   contact_info["Twitter"],
+                            "LinkedIn":  contact_info["LinkedIn"],
+                            "TikTok":    contact_info["TikTok"],
+                            "YouTube":   contact_info["YouTube"],
+                            "Maps URL":  href,
+                        }
 
-    # ── 6. Save results ───────────────────────────────────────────────────
-    if not results:
-        print("\n[!] No new matching businesses found.")
-        return
+                        results.append(record)
+                        new_seen_keys.add(key)
+                        scraped_count += 1
+                        remaining = max_results - scraped_count
+                        print(f"  [{total_inspected}] ✓ ({scraped_count}/{max_results}) {name} | {phone} | {address[:45]}")
 
-    df = pd.DataFrame(results)
-    df.index = range(1, len(df) + 1)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as e:
+                        print(f"  [{total_inspected}] ERROR: {e}")
+                    finally:
+                        try:
+                            await detail_page.close()
+                        except Exception:
+                            pass
 
-    # Resolve output path (handles locked file)
-    output = safe_output_path(output)
+                await page.close()
 
-    sheet_name = "Website Leads" if with_websites else "No Website Leads"
+                # Mark this query config as completed in progress
+                item_key = f"{search_query}||{current_location}"
+                completed_items.add(item_key)
+                progress[session_key] = list(completed_items)
+                save_progress(PROGRESS_FILE, progress)
 
-    if output.endswith(".xlsx"):
-        try:
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, sheet_name=sheet_name, index_label="#")
-                ws = writer.sheets[sheet_name]
-                for col in ws.columns:
-                    max_len = max(len(str(cell.value or "")) for cell in col) + 4
-                    ws.column_dimensions[col[0].column_letter].width = min(max_len, 60)
-            print(f"\n[✓] Saved {len(df)} leads → {output}")
-        except PermissionError:
-            # Last-resort fallback to CSV
-            csv_path = output.replace(".xlsx", ".csv")
-            df.to_csv(csv_path, index_label="#")
-            print(f"\n[!] Could not write Excel file. Saved as CSV → {csv_path}")
-    else:
-        df.to_csv(output, index_label="#")
-        print(f"\n[✓] Saved {len(df)} leads → {output}")
+                print(f"[*] Progress: {scraped_count}/{max_results} matching businesses found so far")
+                print(f"[*] Query \"{search_query}\" in {current_location} completed and saved to progress")
 
-    # ── 7. Summary ────────────────────────────────────────────────────────
-    print(f"\n{'─'*55}")
-    print(f"  Total leads collected : {len(df)}")
-    print(f"  With phone number     : {df['Phone'].astype(bool).sum()}")
-    print(f"  With email            : {df['Email'].astype(bool).sum()}")
-    print(f"  With address          : {df['Address'].astype(bool).sum()}")
-    if 'Website' in df.columns:
-        print(f"  With website          : {df['Website'].astype(bool).sum()}")
-    social_cols = ["Instagram", "Facebook", "Twitter", "LinkedIn", "TikTok", "YouTube"]
-    for col in social_cols:
-        if col in df.columns:
-            count = df[col].astype(bool).sum()
-            if count:
-                print(f"  With {col:17s} : {count}")
-    print(f"{'─'*55}")
+            await browser.close()
+    
+    except asyncio.CancelledError:
+        print("\n\n[!] Scraping interrupted by user. Saving collected data...")
+    finally:
+        # ── 5. Persist seen keys ──────────────────────────────────────────────
+        seen.update(new_seen_keys)
+        save_seen(SEEN_FILE, seen)
+        print(f"\n[*] Updated seen list → {len(seen)} total businesses tracked in {SEEN_FILE}")
+
+        # ── 6. Save results ───────────────────────────────────────────────────
+        if not results:
+            print("\n[!] No new matching businesses found.")
+        else:
+            df = pd.DataFrame(results)
+            df.index = range(1, len(df) + 1)
+
+            # Resolve output path (handles locked file)
+            output = safe_output_path(output)
+
+            sheet_name = "Website Leads" if with_websites else "No Website Leads"
+
+            if output.endswith(".xlsx"):
+                try:
+                    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                        df.to_excel(writer, sheet_name=sheet_name, index_label="#")
+                        ws = writer.sheets[sheet_name]
+                        for col in ws.columns:
+                            max_len = max(len(str(cell.value or "")) for cell in col) + 4
+                            ws.column_dimensions[col[0].column_letter].width = min(max_len, 60)
+                    print(f"\n[✓] Saved {len(df)} leads → {output}")
+                except PermissionError:
+                    # Last-resort fallback to CSV
+                    csv_path = output.replace(".xlsx", ".csv")
+                    df.to_csv(csv_path, index_label="#")
+                    print(f"\n[!] Could not write Excel file. Saved as CSV → {csv_path}")
+            else:
+                df.to_csv(output, index_label="#")
+                print(f"\n[✓] Saved {len(df)} leads → {output}")
+
+            # ── 7. Summary ────────────────────────────────────────────────────────
+            print(f"\n{'─'*55}")
+            print(f"  Total leads collected : {len(df)}")
+            print(f"  With phone number     : {df['Phone'].astype(bool).sum()}")
+            print(f"  With email            : {df['Email'].astype(bool).sum()}")
+            print(f"  With address          : {df['Address'].astype(bool).sum()}")
+            if 'Website' in df.columns:
+                print(f"  With website          : {df['Website'].astype(bool).sum()}")
+            social_cols = ["Instagram", "Facebook", "Twitter", "LinkedIn", "TikTok", "YouTube"]
+            for col in social_cols:
+                if col in df.columns:
+                    count = df[col].astype(bool).sum()
+                    if count:
+                        print(f"  With {col:17s} : {count}")
+            print(f"{'─'*55}")
 
 
 # ──────────────────────────────────────────────
@@ -868,7 +873,10 @@ Examples:
         os.remove(PROGRESS_FILE)
         print(f"[*] Cleared query progress cache ({PROGRESS_FILE})\n")
 
-    asyncio.run(scrape(args.query, args.location, args.max, args.output, args.with_websites))
+    try:
+        asyncio.run(scrape(args.query, args.location, args.max, args.output, args.with_websites))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":
